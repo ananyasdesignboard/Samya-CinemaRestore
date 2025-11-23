@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Samya: Cinema Restore</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <!-- Libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/addons/p5.sound.min.js"></script>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+
+  <style>
+    body {
+      margin: 0; padding: 0;
+      background-color: #1a0505; /* Dark velvet for outside */
+      display: flex; justify-content: center; align-items: center;
+      height: 100vh; overflow: hidden;
+      font-family: 'Times New Roman', serif;
+    }
+    canvas {
+      box-shadow: 0 0 30px rgba(218, 165, 32, 0.3);
+      border-radius: 15px;
+    }
+    #loading {
+      position: absolute; color: #daab32;
+      font-size: 24px; background: rgba(20, 5, 5, 0.9);
+      padding: 30px; border: 2px solid #daab32;
+      border-radius: 10px; text-align: center; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  Loading Cinema Engine...<br>
+  <small style="font-family:Arial; font-size:14px; color:#aaa">Please allow camera access</small>
+</div>
+
+<script>
+// --- CONFIGURATION (Vintage Theme) ---
+const C_BG = "#fdfaf0";         // Ivory
+const C_PANEL = "#ffffff";      // White Card
+const C_GOLD = "#a0522d";       // Sienna/Copper
+const C_TEXT = "#3c281e";       // Dark Coffee
+const C_TARGET_GLOW = "#dc143c";// Crimson
+
+// Grid
+const GRID_COLS = 5;
+const GRID_ROWS = 6;
+
+// Global Vars
+let handPose, video, hands = [];
+let handDetected = false;
+let modelLoaded = false;
+
+// Game Assets
+let posterImages = [];
+let currentPosterColor, currentPosterBW;
+let posterW, posterH, blockW, blockH;
+let offsetX, offsetY;
+
+// Game Logic
+let level = 0;
+let score = 0;
+let grid = [];
+let target = {gx: 0, gy: 0};
+let piece = {x: 0, y: 0, gx: 0, gy: 0, angle: 0, texture: null, originalTexture: null};
+
+// Physics & Control
+let fallSpeed = 1.5; // <--- CHANGED: Reduced speed from 3 to 1.5 for seniors
+let isPinching = false;
+let pinchCooldown = 0;
+let targetHandX = 0;
+
+// Feedback
+let message = "";
+let messageTimer = 0;
+
+// Music
+let bgMusic;
+
+// ---------------------------------------------------------
+// IMPORTANT: Update these filenames to match your 'posters' folder
+// ---------------------------------------------------------
+let posterFiles = [
+  "posters/1.jpg", 
+  "posters/2.jpg",
+  "posters/3.jpg"
+];
+
+function preload() {
+  // Load Images
+  for(let f of posterFiles) {
+    posterImages.push(loadImage(f));
+  }
+  // Load Music (Optional - uncomment if you added music)
+  bgMusic = loadSound('music/background.mp3');
+}
+
+function setup() {
+  createCanvas(1280, 720);
+  
+  video = createCapture(VIDEO);
+  video.size(640, 480);
+  video.hide();
+  
+  updateLoading("Get ready to relive the golden era...");
+  handPose = ml5.handPose(video, modelReady);
+  
+  // Initialize Game
+  startLevel();
+}
+
+function updateLoading(msg) {
+  let el = select('#loading');
+  if(el) el.html(msg);
+}
+
+function modelReady() {
+  console.log("Model Ready");
+  modelLoaded = true;
+  handPose.detectStart(video, gotHands);
+  select('#loading').style('display', 'none');
+  
+  // Play Music if loaded
+  if(bgMusic) { 
+    bgMusic.setVolume(0.4);
+    bgMusic.loop(); 
+  }
+}
+
+function gotHands(results) {
+  hands = results;
+  handDetected = (hands.length > 0);
+}
+
+function startLevel() {
+  if(posterImages.length === 0) return;
+  
+  // Setup Poster
+  currentPosterColor = posterImages[level % posterImages.length];
+  
+  // Resize poster to fit standard puzzle size
+  // Ensure your images are roughly portrait ratio (3:4) for best results
+  currentPosterColor.resize(450, 600);
+  
+  posterW = currentPosterColor.width;
+  posterH = currentPosterColor.height;
+  
+  // Calculate exact block sizes based on resized poster
+  blockW = posterW / GRID_COLS;
+  blockH = posterH / GRID_ROWS;
+  
+  offsetX = width/2 + 50;
+  offsetY = (height - posterH) / 2;
+  
+  // Create BW Ghost (p5.js filter)
+  currentPosterBW = currentPosterColor.get();
+  currentPosterBW.filter(GRAY);
+  
+  // Reset Grid
+  grid = [];
+  for(let y=0; y<GRID_ROWS; y++) {
+    let row = [];
+    for(let x=0; x<GRID_COLS; x++) row.push(0);
+    grid.push(row);
+  }
+  
+  spawnNewPiece();
+}
+
+function getNextTarget() {
+  // Scan bottom-up
+  for(let y = GRID_ROWS-1; y >= 0; y--) {
+    let emptySlots = [];
+    for(let x=0; x<GRID_COLS; x++) {
+      if(grid[y][x] === 0) emptySlots.push(x);
+    }
+    if(emptySlots.length > 0) {
+      let rX = random(emptySlots);
+      return {gx: rX, gy: y};
+    }
+  }
+  return null;
+}
+
+function spawnNewPiece() {
+  let t = getNextTarget();
+  
+  if(!t) {
+    message = "LEVEL COMPLETE!";
+    messageTimer = millis();
+    setTimeout(() => {
+      level++;
+      startLevel();
+    }, 2000);
+    return;
+  }
+  
+  target = t;
+  
+  // Crop Texture based on calculated block sizes
+  piece.originalTexture = currentPosterColor.get(
+    target.gx * blockW, 
+    target.gy * blockH, 
+    blockW, 
+    blockH
+  );
+  
+  // Random Rotation (0, 90, 180, 270)
+  let angles = [0, 90, 180, 270];
+  piece.angle = random(angles);
+  
+  // Spawn logic
+  piece.gx = floor(random(0, GRID_COLS));
+  // Use center alignment for smoother visual movement
+  piece.x = piece.gx * blockW;
+  piece.y = -150; // Start above screen
+}
+
+function rotatePiece() {
+  piece.angle -= 90;
+}
+
+function draw() {
+  background(C_BG);
+  if(!modelLoaded) return;
+
+  handleVision(); // Process Hand Logic
+  drawUI();       // Draw Pilot Feed
+  drawBoard();    // Draw Puzzle
+  updateGame();   // Physics
+}
+
+function handleVision() {
+  if(hands.length > 0) {
+    let hand = hands[0];
+    let indexTip = hand.keypoints[8];
+    let thumbTip = hand.keypoints[4];
+    let wrist = hand.keypoints[0];
+    let indexBase = hand.keypoints[5];
+    
+    // 1. Calculate Movement (X Axis)
+    // Mirror X
+    let mx = width - (indexTip.x / video.width * width);
+    
+    // Map hand X (0-width) to Poster Area bounds
+    // We map to slightly wider than the poster area for easier edge reaching
+    let mappedX = map(mx, 0, width, -blockW, posterW);
+    // Constrain so the CENTER of the piece stays within grid bounds
+    mappedX = constrain(mappedX, 0, posterW - blockW);
+    
+    // Smooth lerp
+    piece.x = lerp(piece.x, mappedX, 0.15);
+    
+    // 2. Pinch Logic (Rotation)
+    let dPinch = dist(indexTip.x, indexTip.y, thumbTip.x, thumbTip.y);
+    let dHand = dist(wrist.x, wrist.y, indexBase.x, indexBase.y); // Reference size
+    let threshold = dHand * 0.5; 
+    
+    if (dPinch < threshold) {
+      if (!isPinching) {
+        isPinching = true;
+        if (millis() - pinchCooldown > 500) {
+          rotatePiece();
+          pinchCooldown = millis();
+        }
+      }
+    } else {
+      isPinching = false;
+    }
+  }
+}
+
+function updateGame() {
+  // Gravity
+  piece.y += fallSpeed;
+  
+  // Calculate where the bottom of the piece hits the target row
+  let targetPixelY = target.gy * blockH;
+  
+  if (piece.y >= targetPixelY) {
+    checkLock();
+  }
+}
+
+function checkLock() {
+  // Determine which column the piece's center is closest to
+  let currentCol = round(piece.x / blockW);
+  
+  let colMatch = (currentCol === target.gx);
+  // Check if angle is upright (0, 360, -360)
+  let rotMatch = (piece.angle % 360 === 0);
+  
+  if (colMatch && rotMatch) {
+    grid[target.gy][target.gx] = 1;
+    score += 100;
+    message = "Perfect!";
+    messageTimer = millis();
+  } else if (!colMatch) {
+    message = "Wrong Spot!";
+    messageTimer = millis();
+  } else {
+    message = "Wrong Angle!";
+    messageTimer = millis();
+  }
+  
+  spawnNewPiece();
+}
+
+function drawBoard() {
+  // 1. Background Ghost
+  tint(255, 80); // Transparency for ghost
+  image(currentPosterBW, offsetX, offsetY);
+  noTint();
+  
+  // Border
+  noFill();
+  stroke(C_GOLD);
+  strokeWeight(5);
+  rect(offsetX-5, offsetY-5, posterW+10, posterH+10);
+  
+  // 2. Restored Pieces
+  for(let y=0; y<GRID_ROWS; y++) {
+    for(let x=0; x<GRID_COLS; x++) {
+      if(grid[y][x] === 1) {
+        let px = offsetX + x * blockW;
+        let py = offsetY + y * blockH;
+        
+        // Get crop based on exact block dimensions
+        let img = currentPosterColor.get(x*blockW, y*blockH, blockW, blockH);
+        image(img, px, py);
+        
+        stroke(200, 100);
+        strokeWeight(1);
+        noFill();
+        rect(px, py, blockW, blockH);
+      }
+    }
+  }
+  
+  // 3. Target Highlight (Blink)
+  if (floor(millis() / 500) % 2 === 0) {
+    let tx = offsetX + target.gx * blockW;
+    let ty = offsetY + target.gy * blockH;
+    stroke(C_TARGET_GLOW);
+    strokeWeight(4);
+    noFill();
+    rect(tx, ty, blockW, blockH);
+  }
+  
+  // 4. Falling Piece
+  push();
+  // Calculate center of piece for rotation origin
+  let cx = offsetX + piece.x + blockW/2;
+  let cy = offsetY + piece.y + blockH/2;
+  
+  translate(cx, cy);
+  rotate(radians(piece.angle));
+  
+  // Ensure both image and rect are drawn from the center point
+  imageMode(CENTER); 
+  rectMode(CENTER); // <--- FIXED: Align rect mode with image mode
+  
+  image(piece.originalTexture, 0, 0);
+  
+  // Border based on correctness
+  strokeWeight(3);
+  if (piece.angle % 360 === 0) stroke(0, 200, 0); // Green if upright
+  else stroke(255);
+  noFill();
+  rect(0, 0, blockW, blockH);
+  pop();
+}
+
+function drawUI() {
+  // Title
+  fill(C_GOLD);
+  noStroke();
+  textAlign(CENTER);
+  textSize(40);
+  text("Cinema Restore", width/2, 50);
+  
+  // Message
+  if (millis() - messageTimer < 1500) {
+    fill(message.includes("Perfect") ? "#27ae60" : "#c0392b");
+    textSize(50);
+    // Draw over the board
+    text(message, offsetX + posterW/2, offsetY + posterH/2);
+  }
+
+  // Left Panel
+  let px = 30, py = height/2 - 200;
+  
+  // Card Shadow
+  fill(220, 210, 200);
+  rect(px+5, py+5, 360, 400, 15);
+  
+  // Card
+  fill(C_PANEL);
+  stroke(C_GOLD);
+  strokeWeight(3);
+  rect(px, py, 360, 400, 15);
+  
+  // Video Feed
+  push();
+  translate(px + 20 + 320, py + 20); // Move to top-right of video box
+  scale(-1, 1); // Mirror
+  image(video, 0, 0, 320, 240);
+  
+  // Draw Hand Skeleton on Video
+  if(hands.length > 0) {
+    drawSkeleton(hands[0]);
+  }
+  pop();
+  
+  noFill();
+  strokeWeight(4);
+  stroke(handDetected ? "#27ae60" : "#c0392b");
+  rect(px+20, py+20, 320, 240);
+  
+  // Instructions
+  fill(C_TEXT);
+  noStroke();
+  textAlign(LEFT);
+  textSize(20);
+  text("Index Finger: Move Left/Right", px+20, py+300);
+  fill(C_GOLD);
+  text("Pinch: ROTATE Image", px+20, py+340);
+  
+  // Music Status
+  fill(200);
+  textSize(16);
+  text(bgMusic ? "Music Playing" : "Music Off", px+20, py+380);
+}
+
+function drawSkeleton(hand) {
+  noStroke();
+  fill(0, 255, 0);
+  
+  // Scale factor because video is drawn at 320x240 but coords are 640x480
+  let sX = 320/640;
+  let sY = 240/480;
+  
+  for(let kp of hand.keypoints) {
+    circle(kp.x * sX, kp.y * sY, 6);
+  }
+  
+  stroke(0, 255, 0);
+  strokeWeight(2);
+  
+  let fingers = [[0,1,2,3,4], [0,5,6,7,8], [0,9,10,11,12], [0,13,14,15,16], [0,17,18,19,20]];
+  for(let f of fingers) {
+    for(let i=0; i<f.length-1; i++) {
+      let p1 = hand.keypoints[f[i]];
+      let p2 = hand.keypoints[f[i+1]];
+      line(p1.x*sX, p1.y*sY, p2.x*sX, p2.y*sY);
+    }
+  }
+  
+  // Visual Pinch Line
+  let indexTip = hand.keypoints[8];
+  let thumbTip = hand.keypoints[4];
+  stroke(isPinching ? "green" : "orange");
+  strokeWeight(4);
+  line(indexTip.x*sX, indexTip.y*sY, thumbTip.x*sX, thumbTip.y*sY);
+}
+</script>
+</body>
+</html>
